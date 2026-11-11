@@ -9,6 +9,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Set;
 
 // Аннотация с целочисленным параметром — количеством вызовов.
 @Retention(RetentionPolicy.RUNTIME)
@@ -19,14 +21,16 @@ import java.util.Comparator;
 
 class Person {
   private final String name;
+  private final int age;
 
-  public Person() {
-    this.name = "Артур";
+  public Person(String name, int age) {
+    this.name = name;
+    this.age = age;
   }
 
   @Override
   public String toString() {
-    return name;
+    return name + ", возраст: " + age;
   }
 }
 
@@ -79,6 +83,14 @@ class ArgumentFactory {
   public static Object createArgument(Class<?> type)
           throws ReflectiveOperationException {
 
+    return createArgument(type, new HashSet<>());
+  }
+
+  private static Object createArgument(
+          Class<?> type,
+          Set<Class<?>> creatingTypes
+  ) throws ReflectiveOperationException {
+
     if (type == String.class) {
       return "Пример";
     }
@@ -115,12 +127,10 @@ class ArgumentFactory {
       return (short) 2;
     }
 
-    // Для массива создаём пустой массив нужного типа.
     if (type.isArray()) {
       return Array.newInstance(type.getComponentType(), 0);
     }
 
-    // Для перечисления выбираем первую константу.
     if (type.isEnum()) {
       Object[] constants = type.getEnumConstants();
 
@@ -134,20 +144,69 @@ class ArgumentFactory {
       return constants[0];
     }
 
-    // Нельзя напрямую создать интерфейс или абстрактный класс.
     if (type.isInterface()
             || Modifier.isAbstract(type.getModifiers())) {
       throw new IllegalArgumentException(
-              "Нужен отдельный способ создания объекта типа: "
+              "Нельзя автоматически создать интерфейс "
+                      + "или абстрактный класс: "
                       + type.getName()
       );
     }
 
-    // Остальные объекты создаём через конструктор без параметров.
-    Constructor<?> constructor = type.getDeclaredConstructor();
-    constructor.setAccessible(true);
+    if (!creatingTypes.add(type)) {
+      throw new IllegalArgumentException(
+              "Циклическая зависимость при создании: "
+                      + type.getName()
+      );
+    }
 
-    return constructor.newInstance();
+    try {
+      Constructor<?>[] constructors =
+              type.getDeclaredConstructors();
+
+      Arrays.sort(
+              constructors,
+              Comparator.comparingInt(
+                      (Constructor<?> constructor) ->
+                              constructor.getParameterCount()
+              )
+      );
+
+      ReflectiveOperationException failure =
+              new ReflectiveOperationException(
+                      "Не удалось создать объект типа: "
+                              + type.getName()
+              );
+
+      for (Constructor<?> constructor : constructors) {
+        try {
+          Class<?>[] parameterTypes =
+                  constructor.getParameterTypes();
+
+          Object[] arguments =
+                  new Object[parameterTypes.length];
+
+          for (int i = 0; i < parameterTypes.length; i++) {
+            arguments[i] = createArgument(
+                    parameterTypes[i],
+                    creatingTypes
+            );
+          }
+
+          constructor.setAccessible(true);
+          return constructor.newInstance(arguments);
+
+        } catch (ReflectiveOperationException
+                 | RuntimeException exception) {
+          failure.addSuppressed(exception);
+        }
+      }
+
+      throw failure;
+
+    } finally {
+      creatingTypes.remove(type);
+    }
   }
 }
 
